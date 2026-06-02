@@ -1,0 +1,391 @@
+require('dotenv').config();
+const readline = require('readline');
+const { exec } = require('child_process');
+const util = require('util');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// Inisialisasi Otak Gemini
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+
+function runGMGN(command) {
+    return new Promise((resolve, reject) => {
+        // Tambahin maxBuffer 10MB biar ga crash pas narik JSON gede
+        exec(`npx ${command}`, { env: process.env, maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+            if (error) {
+                reject(error);
+                return;
+            }
+            resolve(stdout);
+        });
+    });
+}
+
+// Helper buat delay/jeda nunggu
+const delay = ms => new Promise(res => setTimeout(res, ms));
+
+// ==========================================
+// 🧮 HELPER: Kalkulasi Total Fees Akurat (Prio + Tip + Trading)
+// ==========================================
+function calculateTotalFees(token) {
+    const prio = parseFloat(token.priority_fee || 0);
+    const tip = parseFloat(token.tip || token.jito_tip || token.tip_fee || 0);
+    const trading = parseFloat(token.trading_fee || token.dex_fee || 0);
+    const gas = parseFloat(token.gas_fee || 0);
+    const explicitSum = prio + tip + trading + gas;
+    
+    const total = parseFloat(token.total_fee || 0);
+    // Ambil nilai terbesar untuk menghindari double-count jika total_fee sudah di-merge oleh API
+    const finalFee = total > explicitSum ? total : (explicitSum > 0 ? explicitSum : total);
+    return finalFee > 0 ? finalFee.toFixed(4) : '0';
+}
+
+// ==========================================
+//  HELPER: Fungsi Manggil Otak AI
+// ==========================================
+async function askGemini(rawData, customPrompt, retries = 3) {
+    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" }); 
+    const finalPrompt = `${customPrompt}\n\nBerikut adalah data mentah JSON-nya:\n${rawData}`;
+    
+    for (let i = 0; i < retries; i++) {
+        try {
+            const result = await model.generateContent(finalPrompt);
+            return result.response.text();
+        } catch (error) {
+            // Kalo errornya 503 (High Demand), kita tunggu dan coba lagi
+            if (error.message && error.message.includes('503')) {
+                console.log(`\x1b[33m⏳ Server API Gemini lagi penuh (503). Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                await delay((i + 1) * 2000);
+                continue; // Lanjut ke iterasi looping berikutnya
+            }
+            return `❌ Gagal mikir AI-nya: ${error.message}`;
+        }
+    }
+    return `❌ AI-nya nyerah bro. Udah di-retry ${retries} kali server tetep penuh (503). Coba lagi nanti!`;
+}
+
+// ==========================================
+// 🎨 HELPER: Formatter Warna Terminal
+// ==========================================
+function formatData(rawJson) {
+    try {
+        const obj = JSON.parse(rawJson);
+        if (obj.data && obj.data.rank) {
+            let result = '';
+            obj.data.rank.forEach((token, i) => {
+                const mc = (token.market_cap).toLocaleString('en-US');
+                const change = token.price_change_percent1h || 0;
+                const changeColor = change >= 0 ? '\x1b[32m' : '\x1b[31m'; 
+                const sign = change >= 0 ? '+' : '';
+                const sniper = token.sniper_count || 0;
+                const fee = calculateTotalFees(token);
+
+                result += `\x1b[36m[${i + 1}]\x1b[0m \x1b[33m${token.name}\x1b[0m (\x1b[37m$${token.symbol}\x1b[0m)\n`;
+                result += `    📍 CA : \x1b[90m${token.address}\x1b[0m\n`;
+                result += `    💰 MC : $${mc}\n`;
+                result += `    🎯 Sniper : ${sniper}\n`;
+                result += `    💸 Fees : ${fee}\n`;
+                result += `    📊 1h : ${changeColor}${sign}${change.toFixed(2)}%\x1b[0m\n`;
+                result += `----------------------------------------\n`;
+            });
+            return result;
+        } else {
+            return util.inspect(obj, { colors: true, depth: null });
+        }
+    } catch (e) {
+        return rawJson;
+    }
+}
+
+// ==========================================
+// 🎨 HELPER: Formatter Warna Terminal untuk AI
+// ==========================================
+function formatAIText(text) {
+    return text
+        // Format teks tebal (Markdown) jadi warna Cyan terang
+        .replace(/\*\*(.*?)\*\*/g, '\x1b[1m\x1b[36m$1\x1b[0m')
+        // Warna Status
+        .replace(/🟢 Pass/g, '\x1b[32m🟢 Pass\x1b[0m')
+        .replace(/🔴 Skip/g, '\x1b[31m🔴 Skip\x1b[0m')
+        .replace(/🟡 Watch/g, '\x1b[33m🟡 Watch\x1b[0m')
+        // Warna Kategori Mode 5 & Highlight Angka / CA
+        .replace(/📍 CA:\s*([a-zA-Z0-9]+)/g, '\x1b[90m📍 CA:\x1b[0m \x1b[36m$1\x1b[0m')
+        .replace(/💰 MC \/ Vol:\s*(.*)/g, '\x1b[33m💰 MC / Vol:\x1b[0m \x1b[32m$1\x1b[0m')
+        .replace(/🧠 Smart Wallets:\s*([0-9]+)/g, '\x1b[35m🧠 Smart Wallets:\x1b[0m \x1b[33m$1\x1b[0m')
+        .replace(/🧠 Smart Wallets & KOL:\s*(.*)/gi, '\x1b[35m🧠 Smart Wallets & KOL:\x1b[0m \x1b[33m$1\x1b[0m')
+        .replace(/🎯 Sniper:\s*([0-9]+)/gi, '\x1b[35m🎯 Sniper:\x1b[0m \x1b[31m$1\x1b[0m')
+        .replace(/💸 Total Fees:\s*(.*)/gi, '\x1b[33m💸 Total Fees:\x1b[0m \x1b[32m$1\x1b[0m')
+        .replace(/⚠️ Rug Ratio:\s*([0-9.]+)/g, '\x1b[33m⚠️ Rug Ratio:\x1b[0m \x1b[31m$1\x1b[0m')
+        .replace(/🛡️ Status Keseluruhan:/g, '\x1b[34m🛡️ Status Keseluruhan:\x1b[0m')
+        .replace(/🚩 Sinyal Merah:/g, '\x1b[31m🚩 Sinyal Merah:\x1b[0m')
+        .replace(/💡 Sinyal Hijau:/g, '\x1b[32m💡 Sinyal Hijau:\x1b[0m')
+        // Warna Kategori Mode 3
+        .replace(/🔥 META SAAT INI:/g, '\x1b[36m🔥 META SAAT INI:\x1b[0m')
+        .replace(/🔑 KEYWORDS:/g, '\x1b[33m🔑 KEYWORDS:\x1b[0m')
+        .replace(/👑 TOP 3 KOIN REPRESENTATIF:/g, '\x1b[35m👑 TOP 3 KOIN REPRESENTATIF:\x1b[0m')
+        .replace(/🎯 RATA-RATA SNIPER & FEES:/g, '\x1b[35m🎯 RATA-RATA SNIPER & FEES:\x1b[0m')
+        .replace(/💡 KESIMPULAN:/g, '\x1b[32m💡 KESIMPULAN:\x1b[0m');
+}
+
+// ==========================================
+// 🕵️‍♂️ MODE 1: Screening CA Spesifik
+// ==========================================
+async function screenSpecificCA(targetToken) {
+    console.log(`\n🕵️‍♂️ Narik data daleman CA: ${targetToken}...`);
+    try {
+        const infoOutput = await runGMGN(`gmgn-cli token info --chain sol --address ${targetToken}`);
+        console.log("\n================ [ 📊 DATA KONTRAK ] ================");
+        console.log(formatData(infoOutput));
+        
+        console.log(`\n🤖 Sabar, AI lagi ngebedah data keamanan & resikonya...`);
+        const securityOutput = await runGMGN(`gmgn-cli token security --chain sol --address ${targetToken}`);
+        
+        // Narik data Total Fee dengan nge-scan endpoint market 1h, 24h, dan trenches biar akurat kayak Mode 5
+        let feeTambahan = "Tidak tersedia (Token tidak masuk radar trending/trenches)";
+        try {
+            const [trend1h, trend24h, trenches] = await Promise.all([
+                runGMGN(`gmgn-cli market trending --chain sol --interval 1h --limit 100 --raw`).catch(() => '{}'),
+                runGMGN(`gmgn-cli market trending --chain sol --interval 24h --limit 100 --raw`).catch(() => '{}'),
+                runGMGN(`gmgn-cli market trenches --chain sol --limit 80 --raw`).catch(() => '{}')
+            ]);
+            
+            const extractTokens = (raw) => {
+                try {
+                    const obj = JSON.parse(raw);
+                    if (obj.data && obj.data.rank) return obj.data.rank;
+                    if (obj.data && (obj.data.new_creation || obj.data.pump || obj.data.completed)) {
+                        return [
+                            ...(obj.data.new_creation || []), 
+                            ...(obj.data.pump || []), 
+                            ...(obj.data.completed || [])
+                        ];
+                    }
+                } catch(e) {}
+                return [];
+            };
+
+            const allTokens = [...extractTokens(trend1h), ...extractTokens(trend24h), ...extractTokens(trenches)];
+            const found = allTokens.find(t => t.address === targetToken);
+            
+            if (found) {
+                feeTambahan = `${calculateTotalFees(found)} SOL`;
+            } else {
+                // Fallback cek langsung dari data token info
+                try {
+                    const infoObj = JSON.parse(infoOutput);
+                    if (infoObj.data) {
+                        const fee = calculateTotalFees(infoObj.data);
+                        if (fee !== '0' && fee !== '0.0000') feeTambahan = `${fee} SOL`;
+                    }
+                } catch(e) {}
+            }
+        } catch (e) {
+            // Abaikan error
+        }
+
+        const rawData = `[DATA INFO]\n${infoOutput}\n\n[DATA SECURITY]\n${securityOutput}\n\n[DATA TRENDING FEE]\nTotal Fees: ${feeTambahan}`;
+        
+        const systemPrompt = `Lu adalah crypto degen risk analyst. Tugas lu mengevaluasi data info dan security token Solana ini berdasarkan kriteria risiko standar GMGN.
+        Kriteria:
+        - rug_ratio: < 0.1 (Pass), 0.1-0.3 (Watch), > 0.3 (Skip)
+        - is_wash_trading: true langsung SKIP.
+        - top_10_holder_rate: < 0.2 (Pass), 0.2-0.5 (Watch), > 0.5 (Skip)
+        - smart_wallets: >= 3 (Pass), 1-2 (Watch), 0 (Skip)
+
+        Tampilkan laporan evaluasi risiko secara ringkas:
+        **[Symbol] - [Harga]**
+           📍 CA: ${targetToken}
+           💰 MC / Vol: $(Hitung market cap: price * circulating_supply) / $(Tampilkan volume 24h)
+           🧠 Smart Wallets & KOL: (Tampilkan jumlah smart_wallets / renowned_wallets)
+           🎯 Sniper: (Tampilkan sniper_count)
+           💸 Total Fees: (Ambil info persis dari bagian [DATA TRENDING FEE])
+           ⚠️ Rug Ratio: (Tampilkan rug_ratio)
+           🛡️ Status Keseluruhan: 🟢 Pass / 🟡 Watch / 🔴 Skip (Berdasarkan dominasi kriteria)
+           🚩 Sinyal Merah: (Sebutkan risiko utamanya, misal rug ratio tinggi/holder mendominasi/wash trading)
+           💡 Sinyal Hijau: (Sebutkan jika ada metrik yang bagus, misal distribusi holder sehat)
+           
+        Di baris paling bawah, berikan kesimpulan singkat dan gaya bahasa anak crypto (degen) apakah token ini aman untuk di-ape atau mending di-skip.`;
+
+        const aiAnalysis = await askGemini(rawData, systemPrompt);
+
+        console.log("\n================ [ 🕵️‍♂️ ANALISA CA SPESIFIK ] ================");
+        console.log(formatAIText(aiAnalysis));
+        console.log("==============================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 🦅 MODE 2: Auto-Hunting Token
+// ==========================================
+async function autoHuntTokens() {
+    console.log(`\n🦅 Narik top 3 token trending (1 Jam Terakhir)...`);
+    try {
+        const output = await runGMGN(`gmgn-cli market trending --chain sol --interval 1h --limit 3`);
+        console.log("\n================ [ 🎯 TRENDING TOKEN ] ================");
+        console.log(formatData(output));
+        console.log("=======================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 🌊 MODE 3: Meta & Narrative Scanner (AI POWERED)
+// ==========================================
+async function scanCurrentMeta() {
+    console.log(`\n🌊 Narik 20 Token Trending... Sabar, lagi nyuruh Gemini mikir narasinya...`);
+    try {
+        let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval 6h --limit 20 --raw`);
+        try {
+            let jsonObj = JSON.parse(rawOutput);
+            if (jsonObj.data && jsonObj.data.rank) {
+                // Injeksi nilai total fees yang akurat sebelum dikasih ke AI
+                jsonObj.data.rank.forEach(t => t.calculated_total_fees = calculateTotalFees(t) + ' SOL');
+            }
+            rawOutput = JSON.stringify(jsonObj);
+        } catch (e) {}
+
+        const systemPrompt = `Lu adalah crypto degen analyst kelas kakap. Tugas lu menganalisa data JSON berisi 20 koin trending di Solana ini.
+        Cari benang merah dari nama (name) dan ticker (symbol) koin-koin tersebut.
+        
+        Tampilkan laporan singkat dan padat dengan format:
+        🔥 META SAAT INI: (Sebutkan narasi yang paling dominan, misal: AI, Kucing, Olahraga, dll)
+        🔑 KEYWORDS: (Sebutkan kata-kata yang sering muncul)
+        👑 TOP 3 KOIN REPRESENTATIF: (Sebutkan 3 koin yang mewakili meta ini beserta % kenaikannya)
+        🎯 RATA-RATA SNIPER & FEES: (Sebutkan insight dari data sniper_count dan rangkum dari nilai "calculated_total_fees" secara keseluruhan)
+        💡 KESIMPULAN: (Analisa lu apakah meta ini masih fresh atau udah mau basi)`;
+
+        const aiAnalysis = await askGemini(rawOutput, systemPrompt);
+
+        console.log("\n================ [ 🧠 ANALISA META GEMINI ] ================");
+        console.log(formatAIText(aiAnalysis));
+        console.log("==============================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 🐢 MODE 4: Slowmoon Radar
+// ==========================================
+async function scanSlowmoon() {
+    console.log(`\n🐢 Mengaktifkan radar Slowmoon (Cek 10 Token 24 Jam Terakhir)...`);
+    try {
+        const output = await runGMGN(`gmgn-cli market trending --chain sol --interval 24h --limit 10`);
+        console.log("\n================ [ 🐢 RADAR SLOWMOON ] ================");
+        console.log(formatData(output));
+        console.log("=======================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// ☠️ MODE 5: Degen Risk Screening (Top 10)
+// ==========================================
+async function screenDegenRisks() {
+    console.log(`\n☠️ Narik top 10 token trending buat screening resiko degen...`);
+    try {
+        let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval 1h --limit 10 --raw`);
+        try {
+            let jsonObj = JSON.parse(rawOutput);
+            if (jsonObj.data && jsonObj.data.rank) {
+                // Injeksi nilai total fees yang akurat sebelum dikasih ke AI
+                jsonObj.data.rank.forEach(t => t.calculated_total_fees = calculateTotalFees(t) + ' SOL');
+            }
+            rawOutput = JSON.stringify(jsonObj);
+        } catch (e) {}
+
+        const systemPrompt = `Lu adalah crypto degen risk analyst. Tugas lu mengevaluasi data JSON dari 10 token trending di Solana ini berdasarkan kriteria risiko standar GMGN.
+        Kriteria:
+        - rug_ratio: < 0.1 (Pass), 0.1-0.3 (Watch), > 0.3 (Skip)
+        - is_wash_trading: true langsung SKIP.
+        - top_10_holder_rate: < 0.2 (Pass), 0.2-0.5 (Watch), > 0.5 (Skip)
+        - smart_degen_count: >= 3 (Pass), 1-2 (Watch), 0 (Skip)
+        - creator_token_status: creator_close (Pass), creator_hold (Skip/Watch)
+        - liquidity: > $50k (Pass), $10k-$50k (Watch), < $10k (Skip)
+
+        Tampilkan laporan evaluasi risiko untuk masing-masing token secara ringkas:
+        **[Nomor]. [Symbol] - [Harga]**
+           📍 CA: (Tampilkan address token)
+           💰 MC / Vol: $(Tampilkan market_cap) / $(Tampilkan volume)
+           🧠 Smart Wallets: (Tampilkan smart_degen_count)
+           🎯 Sniper: (Tampilkan sniper_count)
+           💸 Total Fees: (Tampilkan persis nilai dari atribut "calculated_total_fees")
+           🛡️ Status Keseluruhan: 🟢 Pass / 🟡 Watch / 🔴 Skip (Berdasarkan dominasi kriteria)
+           🚩 Sinyal Merah: (Sebutkan risiko utamanya, misal rug ratio tinggi/holder mendominasi)
+           💡 Sinyal Hijau: (Sebutkan jika ada metrik yang bagus)
+           
+        Di baris paling bawah, berikan kesimpulan 1-2 token yang paling "aman" untuk di-ape (kalau tidak ada bilang hindari semua).`;
+
+        const aiAnalysis = await askGemini(rawOutput, systemPrompt);
+
+        console.log("\n================ [ ☠️ DEGEN RISK SCREENING ] ================");
+        console.log(formatAIText(aiAnalysis));
+        console.log("==============================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 🎮 MENU INTERAKTIF
+// ==========================================
+function showMenu() {
+    console.log(`
+🤖 BOTS DEGEN GMGN (DASHBOARD MODE) 🤖
+====================
+Pilih mode tempur lu:
+1. Screening Data 1 Koin (Butuh CA)
+2. Auto-Hunting (Cek 3 Token Trending)
+3. Meta Scanner (AI Powered)
+4. Slowmoon Radar (Cek Data Harian)
+5. Degen Risk Screening (Top 10 & Analisa Risiko)
+6. Exit
+====================`);
+    
+    rl.question('Masukkan pilihan (1/2/3/4/5/6): ', (answer) => {
+        if (answer === '1') {
+            rl.question('👉 Masukkan CA Token: ', async (ca) => {
+                await screenSpecificCA(ca);
+                showMenu();
+            });
+        } else if (answer === '2') {
+            (async () => {
+                await autoHuntTokens();
+                showMenu();
+            })();
+        } else if (answer === '3') {
+            (async () => {
+                await scanCurrentMeta();
+                showMenu();
+            })();
+        } else if (answer === '4') {
+            (async () => {
+                await scanSlowmoon();
+                showMenu();
+            })();
+        } else if (answer === '5') {
+            (async () => {
+                await screenDegenRisks();
+                showMenu();
+            })();
+        } else if (answer === '6') {
+            console.log('Caw! Keluar dari trenches...');
+            rl.close();
+            process.exit(0);
+        } else {
+            console.log('Pilihan ga valid bro, masukin angka 1 sampe 6 aja.');
+            showMenu();
+        }
+    });
+}
+
+console.log("Menyiapkan amunisi...");
+showMenu();
