@@ -16,8 +16,14 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Inisialisasi Otak Ollama (Custom)
 const ollama = new OpenAI({
-    baseURL: 'https://ollama.fliw.my.id/v1', // Sesuai konvensi OpenAI-compatible
+    baseURL: process.env.OLLAMA_BASE_URL || 'https://ollama.fliw.my.id/v1', // Sesuai konvensi OpenAI-compatible
     apiKey: 'ollama', // API key tidak wajib untuk Ollama, tapi library butuh placeholder
+});
+
+// Inisialisasi Otak B.AI
+const bai = new OpenAI({
+    baseURL: process.env.BAI_BASE_URL || 'https://api.b.ai/v1', 
+    apiKey: process.env.BAI_API_KEY || 'missing_api_key',
 });
 
 let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
@@ -103,6 +109,27 @@ async function askAI(rawData, customPrompt, retries = 3) {
             }
         }
         return `❌ Ollama nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
+    } else if (activeAgent === 'bai') {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await bai.chat.completions.create({
+                    model: process.env.BAI_MODEL || "claude-3-5-sonnet", // Ganti default model jika perlu
+                    messages: [
+                        { role: "system", content: customPrompt },
+                        { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
+                    ]
+                });
+                return response.choices[0].message.content;
+            } catch (error) {
+                if (error.status === 503 || error.status === 429 || (error.message && error.message.includes('503'))) {
+                    console.log(`\x1b[33m⏳ Server API B.AI lagi penuh atau limit. Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 2000);
+                    continue;
+                }
+                return `❌ Gagal mikir B.AI: ${error.message}`;
+            }
+        }
+        return `❌ B.AI nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
     } else { // Groq
         for (let i = 0; i < retries; i++) {
             try {
@@ -188,7 +215,8 @@ function formatAIText(text) {
         .replace(/🔑 KEYWORDS:/g, '\x1b[33m🔑 KEYWORDS:\x1b[0m')
         .replace(/👑 TOP 3 KOIN REPRESENTATIF:/g, '\x1b[35m👑 TOP 3 KOIN REPRESENTATIF:\x1b[0m')
         .replace(/🎯 RATA-RATA SNIPER & FEES:/g, '\x1b[35m🎯 RATA-RATA SNIPER & FEES:\x1b[0m')
-        .replace(/💡 KESIMPULAN:/g, '\x1b[32m💡 KESIMPULAN:\x1b[0m');
+        .replace(/💡 KESIMPULAN:/g, '\x1b[32m💡 KESIMPULAN:\x1b[0m')
+        .replace(/ Risiko Bundler:/g, '\x1b[31m📦 Risiko Bundler:\x1b[0m');
 }
 
 // ==========================================
@@ -414,16 +442,27 @@ async function screenDegenRisksPumpfun() {
             rawOutput = JSON.stringify(jsonObj);
         } catch (e) {}
 
-        const systemPrompt = `Lu adalah crypto degen risk analyst. Tugas lu mengevaluasi data JSON dari 10 token trending di Solana (Khusus Pump.fun) ini berdasarkan kriteria risiko standar GMGN.
+        const systemPrompt = `Lu adalah crypto degen risk analyst. Tugas lu mengevaluasi data JSON dari 10 token trending di Solana (Khusus Pump.fun) ini berdasarkan kriteria risiko standar GMGN. AI juga harus mengevaluasi potensi Bundler dan Konsentrasi Holder.
         Kriteria:
         - rug_ratio: < 0.1 (Pass), 0.1-0.3 (Watch), > 0.3 (Skip)
         - is_wash_trading: true langsung SKIP.
-        - top_10_holder_rate: < 0.2 (Pass), 0.2-0.5 (Watch), > 0.5 (Skip)
+        - top_10_holder_rate: < 20% (Aman), 20%-30% (Waspada), > 30% (Bahaya Bundler/Cabut!)
         - smart_degen_count: >= 3 (Pass), 1-2 (Watch), 0 (Skip)
         - creator_token_status: creator_close (Pass), creator_hold (Skip/Watch)
         - liquidity: > $50k (Pass), $10k-$50k (Watch), < $10k (Skip)
 
-        Tampilkan laporan evaluasi risiko untuk masing-masing token sama persis formatnya dengan Degen Screening biasa.
+        Tampilkan laporan evaluasi risiko untuk masing-masing token secara ringkas:
+        **[Nomor]. [Symbol] - [Harga]**
+           📍 CA: (Tampilkan address token)
+           💰 MC / Vol: $(Tampilkan market_cap) / $(Tampilkan volume)
+           🧠 Smart Wallets: (Tampilkan smart_degen_count)
+           🎯 Sniper: (Tampilkan sniper_count)
+           💸 Total Fees: (Tampilkan persis nilai dari atribut "calculated_total_fees")
+           📦 Risiko Bundler: (Sebutkan tingkat bahayanya berdasarkan top_10_holder_rate, gunakan emoji 🚨 jika > 30%)
+           🛡️ Status Keseluruhan: 🟢 Pass / 🟡 Watch / 🔴 Skip (Berdasarkan dominasi kriteria)
+           🚩 Sinyal Merah: (Sebutkan risiko utamanya, misal rug ratio tinggi/holder mendominasi)
+           💡 Sinyal Hijau: (Sebutkan jika ada metrik yang bagus)
+           
         Di baris paling bawah, berikan kesimpulan 1-2 token yang paling "aman" untuk di-ape (kalau tidak ada bilang hindari semua).`;
 
         const aiAnalysis = await askAI(rawOutput, systemPrompt);
@@ -486,6 +525,64 @@ async function screenTopFees(interval) {
 }
 
 // ==========================================
+// ⚡ MODE 8: Micro Momentum Scanner (5m / 15m)
+// ==========================================
+async function scanMicroMomentum(interval) {
+    console.log(`\n⚡ Narik data token trending (${interval}) buat cari anomali momentum & lonjakan volume...`);
+    try {
+        let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval ${interval} --limit 15 --raw`);
+
+        const systemPrompt = `Lu adalah Crypto Scalper/Sniper handal. Tugas lu mencari koin yang volume dan harganya mau meledak di timeframe super pendek (${interval}) berdasarkan data JSON ini.
+        Fokus cari anomali lonjakan volume mendadak atau buy pressure yang tinggi.
+        
+        Tampilkan laporan evaluasi momentum secara ringkas:
+        **[Nomor]. [Symbol] - [Harga]**
+           📍 CA: (Tampilkan address token)
+           💰 MC: $(Tampilkan market_cap)
+           🚀 Lonjakan ${interval}: (Tampilkan price_change_percent dengan tanda % dan + jika positif)
+           💡 Indikasi Sinyal: (Analisa lu apakah buy pressure ini organik atau murni bot wash trading)
+           
+        Di baris paling bawah, berikan kesimpulan 1-2 token yang momentumnya paling gila dan layak di-snipe sekarang.`;
+
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
+
+        console.log(`\n================ [ ⚡ MICRO MOMENTUM SCANNER (${interval.toUpperCase()}) - ${activeAgent.toUpperCase()} ] ================`);
+        console.log(formatAIText(aiAnalysis));
+        console.log("=================================================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 🕵️‍♂️ MODE 9: Creator Wallet Scanner
+// ==========================================
+async function scanCreatorWallet(creatorAddress) {
+    console.log(`\n🕵️‍♂️ Narik data performa wallet dev: ${creatorAddress}...`);
+    try {
+        let rawOutput = await runGMGN(`gmgn-cli wallet info --chain sol --address ${creatorAddress}`);
+
+        const systemPrompt = `Lu adalah crypto investigator spesialis on-chain. Tugas lu membedah data mentah dari dompet dev ini untuk mencari tanda-tanda 'Serial Rugger'.
+        Cari tanda-tanda seperti: win rate sangat rendah, token sering dicabut liquidity-nya, atau total PnL minus parah.
+        
+        Tampilkan laporan investigasi secara ringkas:
+        👤 Wallet Dev: ${creatorAddress}
+        📊 Win Rate / PnL: (Tampilkan win rate dalam % / total PnL)
+        ☠️ Prediksi Sifat Dev: (Berdasarkan datanya, apakah dia tipe dev yang amanah, jeeter, atau murni serial rugger)
+        
+        Di baris paling bawah, berikan kesimpulan apakah token dari dev ini layak dibeli atau harus di-blacklist.`;
+
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
+
+        console.log(`\n================ [ 🕵️‍♂️ CREATOR WALLET SCANNER - ${activeAgent.toUpperCase()} ] ================`);
+        console.log(formatAIText(aiAnalysis));
+        console.log("=================================================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
 // 🎮 MENU INTERAKTIF
 // ==========================================
 function showMenu() {
@@ -506,11 +603,13 @@ Pilih mode tempur lu:
 5. Degen Risk Screening (Top 10 & Analisa Risiko)
 6. Pumpfun Degen Screening (Khusus akhiran pump)
 7. Top Fees Screening (Cari Token Fee Terbesar - 1h/6h/24h)
-8. Switch Otak AI (Groq / Gemini / Ollama)
-9. Exit
+8. Micro-Momentum Radar (5m / 15m)
+9. Scan Dosa Creator (Butuh Address Dompet)
+10. Switch Agent AI
+11. Exit
 ====================`);
     
-    rl.question('Masukkan pilihan (1-9): ', (answer) => {
+    rl.question('Masukkan pilihan (1-11): ', (answer) => {
         if (answer === '1') {
             rl.question('👉 Masukkan CA Token: ', async (ca) => {
                 await screenSpecificCA(ca);
@@ -552,7 +651,22 @@ Pilih mode tempur lu:
                 showMenu();
             });
         } else if (answer === '8') {
-            rl.question('👉 Pilih Otak AI (1:Groq, 2:Gemini, 3:Ollama): ', (choice) => {
+            rl.question('👉 Pilih timeframe (5m / 15m): ', async (interval) => {
+                const validIntervals = ['5m', '15m'];
+                if (validIntervals.includes(interval.toLowerCase())) {
+                    await scanMicroMomentum(interval.toLowerCase());
+                } else {
+                    console.log('❌ Timeframe ga valid! Coba ketik 5m atau 15m.');
+                }
+                showMenu();
+            });
+        } else if (answer === '9') {
+            rl.question('👉 Masukkan Address Dompet Creator: ', async (address) => {
+                await scanCreatorWallet(address);
+                showMenu();
+            });
+        } else if (answer === '10') {
+            rl.question('👉 Pilih Otak AI (1:Groq, 2:Gemini, 3:Ollama, 4:B.AI): ', (choice) => {
                 if (choice === '1') {
                     activeAgent = 'groq';
                     console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mGROQ\x1b[0m`);
@@ -563,7 +677,8 @@ Pilih mode tempur lu:
                     showMenu();
                 } else if (choice === '3') {
                     console.log('\n⏳ Cek daftar model dari server Ollama...');
-                    fetch('https://ollama.fliw.my.id/api/tags')
+                    const tagsUrl = process.env.OLLAMA_TAGS_URL || 'https://ollama.fliw.my.id/api/tags';
+                    fetch(tagsUrl)
                         .then(res => res.json())
                         .then(data => {
                             console.log('\n📦 Model Ollama yang tersedia:');
@@ -593,17 +708,21 @@ Pilih mode tempur lu:
                                 showMenu();
                             });
                         });
+                } else if (choice === '4') {
+                    activeAgent = 'bai';
+                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mB.AI\x1b[0m`);
+                    showMenu();
                 } else {
                     console.log('❌ Pilihan AI ga valid!');
                     showMenu();
                 }
             });
-        } else if (answer === '9') {
+        } else if (answer === '11') {
             console.log('Caw! Keluar dari trenches...');
             rl.close();
             process.exit(0);
         } else {
-            console.log('Pilihan ga valid bro, masukin angka 1 sampe 9 aja.');
+            console.log('Pilihan ga valid bro, masukin angka 1 sampe 11 aja.');
             showMenu();
         }
     });
