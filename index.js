@@ -13,8 +13,16 @@ const groq = new OpenAI({
 
 // Inisialisasi Otak Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
 
+// Inisialisasi Otak Ollama (Custom)
+const ollama = new OpenAI({
+    baseURL: 'https://ollama.fliw.my.id/v1', // Sesuai konvensi OpenAI-compatible
+    apiKey: 'ollama', // API key tidak wajib untuk Ollama, tapi library butuh placeholder
+});
+
+let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
+let activeOllamaModel = 'llama3'; // Default model untuk Ollama
+ 
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -74,7 +82,28 @@ async function askAI(rawData, customPrompt, retries = 3) {
             }
         }
         return `❌ Gemini nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
-    } else {
+    } else if (activeAgent === 'ollama') {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await ollama.chat.completions.create({
+                    model: activeOllamaModel, // Pakai model Ollama yang dipilih
+                    messages: [
+                        { role: "system", content: customPrompt },
+                        { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
+                    ]
+                });
+                return response.choices[0].message.content;
+            } catch (error) {
+                if (error.status === 503 || error.status === 429 || (error.message && error.message.includes('503'))) {
+                    console.log(`\x1b[33m⏳ Server API Ollama lagi penuh atau limit. Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 2000);
+                    continue;
+                }
+                return `❌ Gagal mikir Ollama (${activeOllamaModel}): ${error.message}`;
+            }
+        }
+        return `❌ Ollama nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
+    } else { // Groq
         for (let i = 0; i < retries; i++) {
             try {
                 const response = await groq.chat.completions.create({
@@ -460,10 +489,14 @@ async function screenTopFees(interval) {
 // 🎮 MENU INTERAKTIF
 // ==========================================
 function showMenu() {
+    let agentStatus = activeAgent.toUpperCase();
+    if (activeAgent === 'ollama') {
+        agentStatus += ` (${activeOllamaModel})`;
+    }
     console.log(`
 🤖 BOTS DEGEN GMGN (DASHBOARD MODE) 🤖
 ====================
-Otak Aktif: \x1b[32m${activeAgent.toUpperCase()}\x1b[0m
+Otak Aktif: \x1b[32m${agentStatus}\x1b[0m
 ====================
 Pilih mode tempur lu:
 1. Screening Data 1 Koin (Butuh CA)
@@ -473,7 +506,7 @@ Pilih mode tempur lu:
 5. Degen Risk Screening (Top 10 & Analisa Risiko)
 6. Pumpfun Degen Screening (Khusus akhiran pump)
 7. Top Fees Screening (Cari Token Fee Terbesar - 1h/6h/24h)
-8. Switch Otak AI (Gemini <-> Groq)
+8. Switch Otak AI (Groq / Gemini / Ollama)
 9. Exit
 ====================`);
     
@@ -519,9 +552,52 @@ Pilih mode tempur lu:
                 showMenu();
             });
         } else if (answer === '8') {
-            activeAgent = activeAgent === 'groq' ? 'gemini' : 'groq';
-            console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32m${activeAgent.toUpperCase()}\x1b[0m`);
-            showMenu();
+            rl.question('👉 Pilih Otak AI (1:Groq, 2:Gemini, 3:Ollama): ', (choice) => {
+                if (choice === '1') {
+                    activeAgent = 'groq';
+                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mGROQ\x1b[0m`);
+                    showMenu();
+                } else if (choice === '2') {
+                    activeAgent = 'gemini';
+                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mGEMINI\x1b[0m`);
+                    showMenu();
+                } else if (choice === '3') {
+                    console.log('\n⏳ Cek daftar model dari server Ollama...');
+                    fetch('https://ollama.fliw.my.id/api/tags')
+                        .then(res => res.json())
+                        .then(data => {
+                            console.log('\n📦 Model Ollama yang tersedia:');
+                            data.models.forEach((m, i) => {
+                                console.log(`   ${i + 1}. \x1b[36m${m.name}\x1b[0m`);
+                            });
+                            rl.question(`\n👉 Masukkan nama model atau angka (default: ${activeOllamaModel}): `, (input) => {
+                                activeAgent = 'ollama';
+                                const val = input.trim();
+                                if (val !== '') {
+                                    const num = parseInt(val);
+                                    if (!isNaN(num) && num > 0 && num <= data.models.length) {
+                                        activeOllamaModel = data.models[num - 1].name;
+                                    } else {
+                                        activeOllamaModel = val;
+                                    }
+                                }
+                                console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
+                                showMenu();
+                            });
+                        }).catch(err => {
+                            console.log(`\n❌ Gagal ambil list model otomatis (${err.message})`);
+                            rl.question(`👉 Ketik nama model manual (default: ${activeOllamaModel}): `, (modelName) => {
+                                activeAgent = 'ollama';
+                                if (modelName.trim() !== '') activeOllamaModel = modelName.trim();
+                                console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
+                                showMenu();
+                            });
+                        });
+                } else {
+                    console.log('❌ Pilihan AI ga valid!');
+                    showMenu();
+                }
+            });
         } else if (answer === '9') {
             console.log('Caw! Keluar dari trenches...');
             rl.close();
