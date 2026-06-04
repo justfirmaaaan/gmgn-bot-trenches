@@ -2,10 +2,18 @@ require('dotenv').config();
 const readline = require('readline');
 const { exec } = require('child_process');
 const util = require('util');
+const OpenAI = require('openai');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// Inisialisasi Otak Groq
+const groq = new OpenAI({
+    baseURL: 'https://api.groq.com/openai/v1',
+    apiKey: process.env.GROQ_API_KEY,
+});
 
 // Inisialisasi Otak Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -45,27 +53,50 @@ function calculateTotalFees(token) {
 }
 
 // ==========================================
-//  HELPER: Fungsi Manggil Otak AI
+//  HELPER: Fungsi Manggil Otak AI (Groq/Gemini)
 // ==========================================
-async function askGemini(rawData, customPrompt, retries = 3) {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" }); 
-    const finalPrompt = `${customPrompt}\n\nBerikut adalah data mentah JSON-nya:\n${rawData}`;
-    
-    for (let i = 0; i < retries; i++) {
-        try {
-            const result = await model.generateContent(finalPrompt);
-            return result.response.text();
-        } catch (error) {
-            // Kalo errornya 503 (High Demand), kita tunggu dan coba lagi
-            if (error.message && error.message.includes('503')) {
-                console.log(`\x1b[33m⏳ Server API Gemini lagi penuh (503). Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
-                await delay((i + 1) * 2000);
-                continue; // Lanjut ke iterasi looping berikutnya
+async function askAI(rawData, customPrompt, retries = 3) {
+    if (activeAgent === 'gemini') {
+        // Pake model Gemini yang baru sesuai request lu
+        const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" }); 
+        const finalPrompt = `${customPrompt}\n\nBerikut adalah data mentah JSON-nya:\n${rawData}`;
+        for (let i = 0; i < retries; i++) {
+            try {
+                const result = await model.generateContent(finalPrompt);
+                return result.response.text();
+            } catch (error) {
+                if (error.message && error.message.includes('503')) {
+                    console.log(`\x1b[33m⏳ Server API Gemini lagi penuh (503). Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 2000);
+                    continue;
+                }
+                return `❌ Gagal mikir Gemini: ${error.message}`;
             }
-            return `❌ Gagal mikir AI-nya: ${error.message}`;
         }
+        return `❌ Gemini nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
+    } else {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await groq.chat.completions.create({
+                    // Setel ke model groq
+                    model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+                    messages: [
+                        { role: "system", content: customPrompt },
+                        { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
+                    ]
+                });
+                return response.choices[0].message.content;
+            } catch (error) {
+                if (error.status === 503 || error.status === 429 || (error.message && error.message.includes('503'))) {
+                    console.log(`\x1b[33m⏳ Server API Groq lagi penuh atau limit. Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 2000);
+                    continue;
+                }
+                return `❌ Gagal mikir Groq: ${error.message}`;
+            }
+        }
+        return `❌ Groq nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
     }
-    return `❌ AI-nya nyerah bro. Udah di-retry ${retries} kali server tetep penuh (503). Coba lagi nanti!`;
 }
 
 // ==========================================
@@ -210,9 +241,9 @@ async function screenSpecificCA(targetToken) {
            
         Di baris paling bawah, berikan kesimpulan singkat dan gaya bahasa anak crypto (degen) apakah token ini aman untuk di-ape atau mending di-skip.`;
 
-        const aiAnalysis = await askGemini(rawData, systemPrompt);
+        const aiAnalysis = await askAI(rawData, systemPrompt);
 
-        console.log("\n================ [ 🕵️‍♂️ ANALISA CA SPESIFIK ] ================");
+        console.log(`\n================ [ 🕵️‍♂️ ANALISA CA SPESIFIK (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
@@ -261,9 +292,9 @@ async function scanCurrentMeta() {
         🎯 RATA-RATA SNIPER & FEES: (Sebutkan insight dari data sniper_count dan rangkum dari nilai "calculated_total_fees" secara keseluruhan)
         💡 KESIMPULAN: (Analisa lu apakah meta ini masih fresh atau udah mau basi)`;
 
-        const aiAnalysis = await askGemini(rawOutput, systemPrompt);
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
 
-        console.log("\n================ [ 🧠 ANALISA META GEMINI ] ================");
+        console.log(`\n================ [ 🧠 ANALISA META ${activeAgent.toUpperCase()} ] ================`);
         console.log(formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
@@ -290,7 +321,7 @@ async function scanSlowmoon() {
 // ☠️ MODE 5: Degen Risk Screening (Top 10)
 // ==========================================
 async function screenDegenRisks() {
-    console.log(`\n☠️ Narik top 10 token trending buat screening resiko degen...`);
+    console.log(`\n☠️ - Narik top 10 token trending buat screening resiko degen...`);
     try {
         let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval 1h --limit 10 --raw`);
         try {
@@ -324,11 +355,102 @@ async function screenDegenRisks() {
            
         Di baris paling bawah, berikan kesimpulan 1-2 token yang paling "aman" untuk di-ape (kalau tidak ada bilang hindari semua).`;
 
-        const aiAnalysis = await askGemini(rawOutput, systemPrompt);
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
 
-        console.log("\n================ [ ☠️ DEGEN RISK SCREENING ] ================");
+        console.log(`\n================ [ ☠️ DEGEN RISK SCREENING (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
         console.log("==============================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 💊 MODE 6: Pump.fun Degen Screening
+// ==========================================
+async function screenDegenRisksPumpfun() {
+    console.log(`\n💊 Narik top 10 token trending (Khusus Pump.fun) buat screening resiko degen...`);
+    try {
+        // Fetch 100 token biar dapet stok token pump yang cukup buat difilter
+        let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval 1h --limit 100 --raw`);
+        try {
+            let jsonObj = JSON.parse(rawOutput);
+            if (jsonObj.data && jsonObj.data.rank) {
+                // Filter khusus yang CA-nya berakhiran 'pump' dan ambil top 10 doang
+                let pumpTokens = jsonObj.data.rank.filter(t => t.address && t.address.endsWith('pump')).slice(0, 10);
+                // Injeksi nilai total fees yang akurat sebelum dikasih ke AI
+                pumpTokens.forEach(t => t.calculated_total_fees = calculateTotalFees(t) + ' SOL');
+                jsonObj.data.rank = pumpTokens;
+            }
+            rawOutput = JSON.stringify(jsonObj);
+        } catch (e) {}
+
+        const systemPrompt = `Lu adalah crypto degen risk analyst. Tugas lu mengevaluasi data JSON dari 10 token trending di Solana (Khusus Pump.fun) ini berdasarkan kriteria risiko standar GMGN.
+        Kriteria:
+        - rug_ratio: < 0.1 (Pass), 0.1-0.3 (Watch), > 0.3 (Skip)
+        - is_wash_trading: true langsung SKIP.
+        - top_10_holder_rate: < 0.2 (Pass), 0.2-0.5 (Watch), > 0.5 (Skip)
+        - smart_degen_count: >= 3 (Pass), 1-2 (Watch), 0 (Skip)
+        - creator_token_status: creator_close (Pass), creator_hold (Skip/Watch)
+        - liquidity: > $50k (Pass), $10k-$50k (Watch), < $10k (Skip)
+
+        Tampilkan laporan evaluasi risiko untuk masing-masing token sama persis formatnya dengan Degen Screening biasa.
+        Di baris paling bawah, berikan kesimpulan 1-2 token yang paling "aman" untuk di-ape (kalau tidak ada bilang hindari semua).`;
+
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
+
+        console.log(`\n================ [ 💊 PUMPFUN DEGEN SCREENING (${activeAgent.toUpperCase()}) ] ================`);
+        console.log(formatAIText(aiAnalysis));
+        console.log("================================================================\n");
+    } catch (error) {
+        console.error("❌ Error cuy:", error.message);
+    }
+}
+
+// ==========================================
+// 💸 MODE 7: Top Fees Screening (1h / 6h / 24h)
+// ==========================================
+async function screenTopFees(interval) {
+    console.log(`\n💸 Narik data token trending (${interval}) buat cari yang fees-nya paling gila...`);
+    try {
+        let rawOutput = await runGMGN(`gmgn-cli market trending --chain sol --interval ${interval} --limit 50 --raw`);
+        try {
+            let jsonObj = JSON.parse(rawOutput);
+            if (jsonObj.data && jsonObj.data.rank) {
+                // Sort berdasarkan kalkulasi fees terbesar (descending)
+                jsonObj.data.rank.sort((a, b) => {
+                    return parseFloat(calculateTotalFees(b)) - parseFloat(calculateTotalFees(a));
+                });
+                
+                // Ambil Top 10 aja biar AI fokus
+                jsonObj.data.rank = jsonObj.data.rank.slice(0, 10);
+                
+                // Injeksi string hasilnya buat AI
+                jsonObj.data.rank.forEach(t => {
+                    t.calculated_total_fees = calculateTotalFees(t) + ' SOL';
+                });
+            }
+            rawOutput = JSON.stringify(jsonObj);
+        } catch (e) {}
+
+        const systemPrompt = `Lu adalah crypto degen analyst. Tugas lu mengevaluasi 10 token dengan TOTAL FEES TERBESAR di Solana (interval ${interval}) berdasarkan data JSON ini.
+        
+        Tampilkan laporan evaluasi risiko secara ringkas:
+        **[Nomor]. [Symbol] - [Harga]**
+           📍 CA: (Tampilkan address token)
+           💰 MC / Vol: $(Tampilkan market_cap) / $(Tampilkan volume)
+           💸 Total Fees: (Tampilkan persis nilai dari atribut "calculated_total_fees")
+           🎯 Sniper & Smart Wallets: (Tampilkan sniper_count / smart_degen_count)
+           🛡️ Status Keseluruhan: 🟢 Pass / 🟡 Watch / 🔴 Skip
+           💡 Insight: (Analisa 1 kalimat kenapa token ini fees-nya gede, misal banyak bot/sniper atau emang volume organik)
+           
+        Di baris paling bawah, berikan kesimpulan 1-2 token yang pergerakannya paling organik dan "aman".`;
+
+        const aiAnalysis = await askAI(rawOutput, systemPrompt);
+
+        console.log(`\n================ [ 💸 TOP FEES SCREENING (${interval.toUpperCase()}) - ${activeAgent.toUpperCase()} ] ================`);
+        console.log(formatAIText(aiAnalysis));
+        console.log("========================================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
     }
@@ -341,16 +463,21 @@ function showMenu() {
     console.log(`
 🤖 BOTS DEGEN GMGN (DASHBOARD MODE) 🤖
 ====================
+Otak Aktif: \x1b[32m${activeAgent.toUpperCase()}\x1b[0m
+====================
 Pilih mode tempur lu:
 1. Screening Data 1 Koin (Butuh CA)
 2. Auto-Hunting (Cek 3 Token Trending)
 3. Meta Scanner (AI Powered)
 4. Slowmoon Radar (Cek Data Harian)
 5. Degen Risk Screening (Top 10 & Analisa Risiko)
-6. Exit
+6. Pumpfun Degen Screening (Khusus akhiran pump)
+7. Top Fees Screening (Cari Token Fee Terbesar - 1h/6h/24h)
+8. Switch Otak AI (Gemini <-> Groq)
+9. Exit
 ====================`);
     
-    rl.question('Masukkan pilihan (1/2/3/4/5/6): ', (answer) => {
+    rl.question('Masukkan pilihan (1-9): ', (answer) => {
         if (answer === '1') {
             rl.question('👉 Masukkan CA Token: ', async (ca) => {
                 await screenSpecificCA(ca);
@@ -377,11 +504,30 @@ Pilih mode tempur lu:
                 showMenu();
             })();
         } else if (answer === '6') {
+            (async () => {
+                await screenDegenRisksPumpfun();
+                showMenu();
+            })();
+        } else if (answer === '7') {
+            rl.question('👉 Pilih timeframe (1h / 6h / 24h): ', async (interval) => {
+                const validIntervals = ['1h', '6h', '24h'];
+                if (validIntervals.includes(interval.toLowerCase())) {
+                    await screenTopFees(interval.toLowerCase());
+                } else {
+                    console.log('❌ Timeframe ga valid! Coba ketik 1h, 6h, atau 24h.');
+                }
+                showMenu();
+            });
+        } else if (answer === '8') {
+            activeAgent = activeAgent === 'groq' ? 'gemini' : 'groq';
+            console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32m${activeAgent.toUpperCase()}\x1b[0m`);
+            showMenu();
+        } else if (answer === '9') {
             console.log('Caw! Keluar dari trenches...');
             rl.close();
             process.exit(0);
         } else {
-            console.log('Pilihan ga valid bro, masukin angka 1 sampe 6 aja.');
+            console.log('Pilihan ga valid bro, masukin angka 1 sampe 9 aja.');
             showMenu();
         }
     });
