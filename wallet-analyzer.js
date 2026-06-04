@@ -1,10 +1,18 @@
 require('dotenv').config();
 const readline = require('readline');
 const { exec } = require('child_process');
+const OpenAI = require('openai');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// Inisialisasi Otak Hermes (OpenRouter)
+const openai = new OpenAI({
+    baseURL: 'https://openrouter.ai/api/v1',
+    apiKey: process.env.OPENROUTER_API_KEY,
+});
 
 // Inisialisasi Otak Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+let activeAgent = process.env.AI_AGENT || 'hermes'; // Default agent
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -26,24 +34,47 @@ function runGMGN(command) {
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
-async function askGemini(rawData, customPrompt, retries = 3) {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); 
-    const finalPrompt = `${customPrompt}\n\nBerikut adalah data mentah JSON-nya:\n${rawData}`;
-    
-    for (let i = 0; i < retries; i++) {
-        try {
-            const result = await model.generateContent(finalPrompt);
-            return result.response.text();
-        } catch (error) {
-            if (error.message && error.message.includes('503')) {
-                console.log(`\x1b[33m⏳ Server AI sibuk (503). Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
-                await delay((i + 1) * 2000);
-                continue;
+async function askAI(rawData, customPrompt, retries = 3) {
+    if (activeAgent === 'gemini') {
+        const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const finalPrompt = `${customPrompt}\n\nBerikut adalah data mentah JSON-nya:\n${rawData}`;
+        for (let i = 0; i < retries; i++) {
+            try {
+                const result = await model.generateContent(finalPrompt);
+                return result.response.text();
+            } catch (error) {
+                if (error.message && (error.message.includes('503') || error.message.includes('429'))) {
+                    console.log(`\x1b[33m⏳ Server API Gemini lagi penuh/limit (429/503). Coba lagi dalam ${(i + 1) * 3} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 3000);
+                    continue;
+                }
+                return `❌ Gagal mikir Gemini: ${error.message}`;
             }
-            return `❌ Gagal mikir AI-nya: ${error.message}`;
         }
+        return `❌ Gemini nyerah bro (Server penuh/limit). Coba lagi nanti!`;
+    } else {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const response = await openai.chat.completions.create({
+                    model: process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free",
+                    messages: [
+                        { role: "system", content: customPrompt },
+                        { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
+                    ]
+                });
+                return response.choices[0].message.content;
+            } catch (error) {
+                if (error.status === 503 || error.status === 429 || (error.message && error.message.includes('503'))) {
+                    console.log(`\x1b[33m⏳ Server API OpenRouter lagi sibuk. Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
+                    await delay((i + 1) * 2000);
+                    continue;
+                }
+                return `❌ Gagal mikir Hermes: ${error.message}`;
+            }
+        }
+        return `❌ Hermes nyerah bro (Server penuh). Coba lagi nanti!`;
     }
-    return `❌ AI-nya nyerah bro (Server penuh). Coba lagi nanti!`;
 }
 
 function formatAIText(text) {
@@ -88,9 +119,9 @@ async function analyzeWallet(walletAddress) {
         💡 KESIMPULAN: (Analisa gaya mainnya. Apakah dia sniper, diamond hand, atau malah jelek winrate-nya? Berikan rekomendasi pakai bahasa degen crypto apakah wallet ini layak di-copytrade, di-watch, atau skip aja.)`;
 
         console.log(`\n🤖 Sabar, AI lagi ngebedah portfolio wallet-nya...`);
-        const aiAnalysis = await askGemini(rawData, systemPrompt);
+        const aiAnalysis = await askAI(rawData, systemPrompt);
 
-        console.log("\n================ [ 🧠 SMART WALLET ANALYZER ] ================");
+        console.log(`\n================ [ 🧠 SMART WALLET ANALYZER (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
@@ -99,11 +130,15 @@ async function analyzeWallet(walletAddress) {
 }
 
 function askWallet() {
-    rl.question('\n👉 Masukkan Address Wallet (atau ketik "exit" buat keluar): ', async (address) => {
+    rl.question(`\n👉 Masukkan Address Wallet (atau ketik "switch" ganti AI, "exit" keluar): `, async (address) => {
         if (address.toLowerCase() === 'exit') {
             console.log('Caw! Keluar dari analyzer...');
             rl.close();
             process.exit(0);
+        } else if (address.toLowerCase() === 'switch') {
+            activeAgent = activeAgent === 'hermes' ? 'gemini' : 'hermes';
+            console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32m${activeAgent.toUpperCase()}\x1b[0m`);
+            askWallet();
         } else {
             await analyzeWallet(address);
             askWallet(); // Loop lagi

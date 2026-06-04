@@ -28,6 +28,7 @@ const bai = new OpenAI({
 
 let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
 let activeOllamaModel = 'llama3'; // Default model untuk Ollama
+let activeBaiModel = process.env.BAI_MODEL || 'claude-3-5-sonnet'; // Default model untuk B.AI
  
 const rl = readline.createInterface({
     input: process.stdin,
@@ -114,6 +115,7 @@ async function askAI(rawData, customPrompt, retries = 3) {
             try {
                 const response = await bai.chat.completions.create({
                     model: process.env.BAI_MODEL || "claude-3-5-sonnet", // Ganti default model jika perlu
+                    model: activeBaiModel,
                     messages: [
                         { role: "system", content: customPrompt },
                         { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
@@ -525,7 +527,7 @@ async function screenTopFees(interval) {
 }
 
 // ==========================================
-// ⚡ MODE 8: Micro Momentum Scanner (5m / 15m)
+// ⚡ MODE 8: Micro Momentum Scanner (5m / 15m / 30m / 1h)
 // ==========================================
 async function scanMicroMomentum(interval) {
     console.log(`\n⚡ Narik data token trending (${interval}) buat cari anomali momentum & lonjakan volume...`);
@@ -583,12 +585,116 @@ async function scanCreatorWallet(creatorAddress) {
 }
 
 // ==========================================
+// 🤖 HELPER: Pilih Agent AI
+// ==========================================
+function chooseAgent(callback) {
+    console.log(`\n================ [ 🧠 PILIH OTAK AI ] ================`);
+    console.log(`1. Groq (Fast, Default)`);
+    console.log(`2. Gemini (Google, Smart)`);
+    console.log(`3. Ollama (Local, Custom)`);
+    console.log(`4. B.AI (Claude/Others)`);
+    
+    rl.question('👉 Pilih Otak AI (1-4, atau Enter untuk Groq): ', (choice) => {
+        if (choice === '1' || choice === '') {
+            activeAgent = 'groq';
+            console.log(`\n🔄 Otak AI disetel ke: \x1b[32mGROQ\x1b[0m`);
+            callback();
+        } else if (choice === '2') {
+            activeAgent = 'gemini';
+            console.log(`\n🔄 Otak AI disetel ke: \x1b[32mGEMINI\x1b[0m`);
+            callback();
+        } else if (choice === '3') {
+            console.log('\n⏳ Cek daftar model dari server Ollama...');
+            const tagsUrl = process.env.OLLAMA_TAGS_URL || 'https://ollama.fliw.my.id/api/tags';
+            fetch(tagsUrl)
+                .then(res => res.json())
+                .then(data => {
+                    console.log('\n📦 Model Ollama yang tersedia:');
+                    data.models.forEach((m, i) => {
+                        console.log(`   ${i + 1}. \x1b[36m${m.name}\x1b[0m`);
+                    });
+                    rl.question(`\n👉 Masukkan nama model atau angka (default: ${activeOllamaModel}): `, (input) => {
+                        activeAgent = 'ollama';
+                        const val = input.trim();
+                        if (val !== '') {
+                            const num = parseInt(val);
+                            if (!isNaN(num) && num > 0 && num <= data.models.length) {
+                                activeOllamaModel = data.models[num - 1].name;
+                            } else {
+                                activeOllamaModel = val;
+                            }
+                        }
+                        console.log(`\n🔄 Otak AI disetel ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
+                        callback();
+                    });
+                }).catch(err => {
+                    console.log(`\n❌ Gagal ambil list model otomatis (${err.message})`);
+                    rl.question(`👉 Ketik nama model manual (default: ${activeOllamaModel}): `, (modelName) => {
+                        activeAgent = 'ollama';
+                        if (modelName.trim() !== '') activeOllamaModel = modelName.trim();
+                        console.log(`\n🔄 Otak AI disetel ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
+                        callback();
+                    });
+                });
+        } else if (choice === '4') {
+            const baiUrl = (process.env.BAI_BASE_URL || 'https://api.b.ai/v1').replace(/\/$/, '') + '/models';
+            console.log('\n⏳ Cek daftar model dari server B.AI...');
+            fetch(baiUrl, {
+                headers: {
+                    'Authorization': `Bearer ${process.env.BAI_API_KEY || 'missing_api_key'}`,
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(res => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            })
+            .then(data => {
+                console.log('\n📦 Model B.AI yang tersedia:');
+                const models = data.data || [];
+                models.forEach((m, i) => {
+                    console.log(`   ${i + 1}. \x1b[36m${m.id}\x1b[0m`);
+                });
+                rl.question(`\n👉 Masukkan nama model atau angka (default: ${activeBaiModel}): `, (input) => {
+                    activeAgent = 'bai';
+                    const val = input.trim();
+                    if (val !== '') {
+                        const num = parseInt(val);
+                        if (!isNaN(num) && num > 0 && num <= models.length) {
+                            activeBaiModel = models[num - 1].id;
+                        } else {
+                            activeBaiModel = val;
+                        }
+                    }
+                    console.log(`\n🔄 Otak AI disetel ke: \x1b[32mB.AI (${activeBaiModel})\x1b[0m`);
+                    callback();
+                });
+            }).catch(err => {
+                console.log(`\n❌ Gagal ambil list model otomatis (${err.message})`);
+                rl.question(`👉 Ketik nama model manual (default: ${activeBaiModel}): `, (modelName) => {
+                    activeAgent = 'bai';
+                    if (modelName.trim() !== '') activeBaiModel = modelName.trim();
+                    console.log(`\n🔄 Otak AI disetel ke: \x1b[32mB.AI (${activeBaiModel})\x1b[0m`);
+                    callback();
+                });
+            });
+        } else {
+            activeAgent = 'groq';
+            console.log(`\n❌ Pilihan tidak valid, default ke: \x1b[32mGROQ\x1b[0m`);
+            callback();
+        }
+    });
+}
+
+// ==========================================
 // 🎮 MENU INTERAKTIF
 // ==========================================
 function showMenu() {
     let agentStatus = activeAgent.toUpperCase();
     if (activeAgent === 'ollama') {
         agentStatus += ` (${activeOllamaModel})`;
+    } else if (activeAgent === 'bai') {
+        agentStatus += ` (${activeBaiModel})`;
     }
     console.log(`
 🤖 BOTS DEGEN GMGN (DASHBOARD MODE) 🤖
@@ -603,8 +709,8 @@ Pilih mode tempur lu:
 5. Degen Risk Screening (Top 10 & Analisa Risiko)
 6. Pumpfun Degen Screening (Khusus akhiran pump)
 7. Top Fees Screening (Cari Token Fee Terbesar - 1h/6h/24h)
-8. Micro-Momentum Radar (5m / 15m)
-9. Scan Dosa Creator (Butuh Address Dompet)
+8. Micro-Momentum Radar (5m / 15m / 30m / 1h)
+9. Creator Wallet Scanner (Wallet Address Needed)
 10. Switch Agent AI
 11. Exit
 ====================`);
@@ -651,8 +757,8 @@ Pilih mode tempur lu:
                 showMenu();
             });
         } else if (answer === '8') {
-            rl.question('👉 Pilih timeframe (5m / 15m): ', async (interval) => {
-                const validIntervals = ['5m', '15m'];
+            rl.question('👉 Pilih timeframe (1m / 5m / 15m / 30m / 1h): ', async (interval) => {
+                const validIntervals = ['1m', '5m', '15m', '30m', '1h'];
                 if (validIntervals.includes(interval.toLowerCase())) {
                     await scanMicroMomentum(interval.toLowerCase());
                 } else {
@@ -666,57 +772,7 @@ Pilih mode tempur lu:
                 showMenu();
             });
         } else if (answer === '10') {
-            rl.question('👉 Pilih Otak AI (1:Groq, 2:Gemini, 3:Ollama, 4:B.AI): ', (choice) => {
-                if (choice === '1') {
-                    activeAgent = 'groq';
-                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mGROQ\x1b[0m`);
-                    showMenu();
-                } else if (choice === '2') {
-                    activeAgent = 'gemini';
-                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mGEMINI\x1b[0m`);
-                    showMenu();
-                } else if (choice === '3') {
-                    console.log('\n⏳ Cek daftar model dari server Ollama...');
-                    const tagsUrl = process.env.OLLAMA_TAGS_URL || 'https://ollama.fliw.my.id/api/tags';
-                    fetch(tagsUrl)
-                        .then(res => res.json())
-                        .then(data => {
-                            console.log('\n📦 Model Ollama yang tersedia:');
-                            data.models.forEach((m, i) => {
-                                console.log(`   ${i + 1}. \x1b[36m${m.name}\x1b[0m`);
-                            });
-                            rl.question(`\n👉 Masukkan nama model atau angka (default: ${activeOllamaModel}): `, (input) => {
-                                activeAgent = 'ollama';
-                                const val = input.trim();
-                                if (val !== '') {
-                                    const num = parseInt(val);
-                                    if (!isNaN(num) && num > 0 && num <= data.models.length) {
-                                        activeOllamaModel = data.models[num - 1].name;
-                                    } else {
-                                        activeOllamaModel = val;
-                                    }
-                                }
-                                console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
-                                showMenu();
-                            });
-                        }).catch(err => {
-                            console.log(`\n❌ Gagal ambil list model otomatis (${err.message})`);
-                            rl.question(`👉 Ketik nama model manual (default: ${activeOllamaModel}): `, (modelName) => {
-                                activeAgent = 'ollama';
-                                if (modelName.trim() !== '') activeOllamaModel = modelName.trim();
-                                console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
-                                showMenu();
-                            });
-                        });
-                } else if (choice === '4') {
-                    activeAgent = 'bai';
-                    console.log(`\n🔄 Otak AI berhasil diubah ke: \x1b[32mB.AI\x1b[0m`);
-                    showMenu();
-                } else {
-                    console.log('❌ Pilihan AI ga valid!');
-                    showMenu();
-                }
-            });
+            chooseAgent(showMenu);
         } else if (answer === '11') {
             console.log('Caw! Keluar dari trenches...');
             rl.close();
@@ -729,4 +785,4 @@ Pilih mode tempur lu:
 }
 
 console.log("Menyiapkan amunisi...");
-showMenu();
+chooseAgent(showMenu);
