@@ -4,6 +4,12 @@ const { exec } = require('child_process');
 const util = require('util');
 const OpenAI = require('openai');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fs = require('fs');
+const path = require('path');
+
+if (!fs.existsSync(path.join(__dirname, 'logs'))) {
+    fs.mkdirSync(path.join(__dirname, 'logs'));
+}
 
 // Inisialisasi Otak Groq
 const groq = new OpenAI({
@@ -50,6 +56,20 @@ function runGMGN(command) {
 
 // Helper buat delay/jeda nunggu
 const delay = ms => new Promise(res => setTimeout(res, ms));
+
+// ==========================================
+// 💾 HELPER: Auto-Save Log ke File
+// ==========================================
+function saveLogToFile(modeName, content) {
+    const date = new Date();
+    const dateStr = date.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    const timeStr = date.toTimeString().split(' ')[0]; // Format: HH:MM:SS
+    const filePath = path.join(__dirname, 'logs', `${modeName}-${dateStr}.txt`);
+    
+    const cleanContent = content.replace(/\x1b\[[0-9;]*m/g, ''); // Bersihkan kode ANSI terminal
+    const logText = `\n[${timeStr}]\n${cleanContent}\n--------------------------------------------------\n`;
+    fs.appendFileSync(filePath, logText, 'utf8');
+}
 
 // ==========================================
 // 🧮 HELPER: Kalkulasi Total Fees Akurat (Prio + Tip + Trading)
@@ -304,6 +324,7 @@ async function screenSpecificCA(targetToken) {
 
         console.log(`\n================ [ 🕵️‍♂️ ANALISA CA SPESIFIK (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('screening', formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -355,6 +376,7 @@ async function scanCurrentMeta() {
 
         console.log(`\n================ [ 🧠 ANALISA META ${activeAgent.toUpperCase()} ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('meta', formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -418,6 +440,7 @@ async function screenDegenRisks() {
 
         console.log(`\n================ [ ☠️ DEGEN RISK SCREENING (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('risk', formatAIText(aiAnalysis));
         console.log("==============================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -471,6 +494,7 @@ async function screenDegenRisksPumpfun() {
 
         console.log(`\n================ [ 💊 PUMPFUN DEGEN SCREENING (${activeAgent.toUpperCase()}) ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('pumpfun', formatAIText(aiAnalysis));
         console.log("================================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -520,6 +544,7 @@ async function screenTopFees(interval) {
 
         console.log(`\n================ [ 💸 TOP FEES SCREENING (${interval.toUpperCase()}) - ${activeAgent.toUpperCase()} ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('fees', formatAIText(aiAnalysis));
         console.log("========================================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -550,6 +575,7 @@ async function scanMicroMomentum(interval) {
 
         console.log(`\n================ [ ⚡ MICRO MOMENTUM SCANNER (${interval.toUpperCase()}) - ${activeAgent.toUpperCase()} ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('momentum', formatAIText(aiAnalysis));
         console.log("=================================================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -578,6 +604,7 @@ async function scanCreatorWallet(creatorAddress) {
 
         console.log(`\n================ [ 🕵️‍♂️ CREATOR WALLET SCANNER - ${activeAgent.toUpperCase()} ] ================`);
         console.log(formatAIText(aiAnalysis));
+        saveLogToFile('creator', formatAIText(aiAnalysis));
         console.log("=================================================================================\n");
     } catch (error) {
         console.error("❌ Error cuy:", error.message);
@@ -747,8 +774,8 @@ Pilih mode tempur lu:
                 showMenu();
             })();
         } else if (answer === '7') {
-            rl.question('👉 Pilih timeframe (1h / 6h / 24h): ', async (interval) => {
-                const validIntervals = ['1h', '6h', '24h'];
+            rl.question('👉 Pilih timeframe (5m / 15m / 30m / 1h / 6h / 24h): ', async (interval) => {
+                const validIntervals = ['5m', '15m', '30m', '1h', '6h', '24h'];
                 if (validIntervals.includes(interval.toLowerCase())) {
                     await screenTopFees(interval.toLowerCase());
                 } else {
