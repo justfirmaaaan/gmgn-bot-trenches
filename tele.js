@@ -8,11 +8,9 @@ const { Telegraf, Markup } = require('telegraf');
 // Inisialisasi Otak
 const groq = new OpenAI({ baseURL: 'https://api.groq.com/openai/v1', apiKey: process.env.GROQ_API_KEY });
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const ollama = new OpenAI({ baseURL: process.env.OLLAMA_BASE_URL || 'https://ollama.fliw.my.id/v1', apiKey: 'ollama' });
 const bai = new OpenAI({ baseURL: process.env.BAI_BASE_URL || 'https://api.b.ai/v1', apiKey: process.env.BAI_API_KEY || 'missing_api_key' });
 
 let activeAgent = process.env.AI_AGENT || 'groq'; 
-let activeOllamaModel = 'llama3'; 
 let activeBaiModel = process.env.BAI_MODEL || 'claude-3-5-sonnet'; 
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
@@ -51,12 +49,6 @@ async function askAI(rawData, customPrompt, retries = 3) {
             catch (e) { await delay((i + 1) * 2000); }
         }
         return `❌ Gemini nyerah bro.`;
-    } else if (activeAgent === 'ollama') {
-        for (let i = 0; i < retries; i++) {
-            try { return (await ollama.chat.completions.create({ model: activeOllamaModel, messages: [{ role: "system", content: customPrompt }, { role: "user", content: `Data:\n${rawData}` }] })).choices[0].message.content; } 
-            catch (e) { await delay((i + 1) * 2000); }
-        }
-        return `❌ Ollama nyerah bro.`;
     } else if (activeAgent === 'bai') {
         for (let i = 0; i < retries; i++) {
             try { return (await bai.chat.completions.create({ model: activeBaiModel, messages: [{ role: "system", content: customPrompt }, { role: "user", content: `Data:\n${rawData}` }] })).choices[0].message.content; } 
@@ -395,16 +387,14 @@ const agentMenu = Markup.inlineKeyboard([
         Markup.button.callback('Gemini', 'set_gemini')
     ],
     [
-        Markup.button.callback('B.AI', 'set_bai'),
-        Markup.button.callback('Ollama', 'set_ollama')
+        Markup.button.callback('B.AI', 'set_bai')
     ],
     [Markup.button.callback('⬅️ Kembali', 'main_menu')]
 ]);
 
 const showMainMenu = (ctx) => {
     let agentStatus = activeAgent.toUpperCase();
-    if (activeAgent === 'ollama') agentStatus += ` (${activeOllamaModel})`;
-    else if (activeAgent === 'bai') agentStatus += ` (${activeBaiModel})`;
+    if (activeAgent === 'bai') agentStatus += ` (${activeBaiModel})`;
 
     const text = `🤖 *BOTS DEGEN GMGN* 🤖\n\nOtak Aktif: *${agentStatus}*\n\nPilih mode tempur lu dari menu di bawah ini atau ketik /ca <address> untuk analisa spesifik.`;
 
@@ -479,7 +469,7 @@ bot.action(/set_(.+)/, async (ctx) => {
         return;
     }
 
-    if (['groq', 'gemini', 'ollama'].includes(newAgent)) {
+    if (['groq', 'gemini'].includes(newAgent)) {
         activeAgent = newAgent;
         await ctx.answerCbQuery(`✅ Otak AI diganti ke: ${newAgent.toUpperCase()}`);
         showMainMenu(ctx);

@@ -20,12 +20,6 @@ const groq = new OpenAI({
 // Inisialisasi Otak Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Inisialisasi Otak Ollama (Custom)
-const ollama = new OpenAI({
-    baseURL: process.env.OLLAMA_BASE_URL || 'https://ollama.fliw.my.id/v1', // Sesuai konvensi OpenAI-compatible
-    apiKey: 'ollama', // API key tidak wajib untuk Ollama, tapi library butuh placeholder
-});
-
 // Inisialisasi Otak B.AI
 const bai = new OpenAI({
     baseURL: process.env.BAI_BASE_URL || 'https://api.b.ai/v1', 
@@ -33,7 +27,6 @@ const bai = new OpenAI({
 });
 
 let activeAgent = process.env.AI_AGENT || 'groq'; // Default agent
-let activeOllamaModel = 'llama3'; // Default model untuk Ollama
 let activeBaiModel = process.env.BAI_MODEL || 'claude-3-5-sonnet'; // Default model untuk B.AI
  
 const rl = readline.createInterface({
@@ -109,27 +102,6 @@ async function askAI(rawData, customPrompt, retries = 3) {
             }
         }
         return `❌ Gemini nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
-    } else if (activeAgent === 'ollama') {
-        for (let i = 0; i < retries; i++) {
-            try {
-                const response = await ollama.chat.completions.create({
-                    model: activeOllamaModel, // Pakai model Ollama yang dipilih
-                    messages: [
-                        { role: "system", content: customPrompt },
-                        { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
-                    ]
-                });
-                return response.choices[0].message.content;
-            } catch (error) {
-                if (error.status === 503 || error.status === 429 || (error.message && error.message.includes('503'))) {
-                    console.log(`\x1b[33m⏳ Server API Ollama lagi penuh atau limit. Coba lagi dalam ${(i + 1) * 2} detik... (Percobaan ${i + 1}/${retries})\x1b[0m`);
-                    await delay((i + 1) * 2000);
-                    continue;
-                }
-                return `❌ Gagal mikir Ollama (${activeOllamaModel}): ${error.message}`;
-            }
-        }
-        return `❌ Ollama nyerah bro. Udah di-retry ${retries} kali server tetep penuh. Coba lagi nanti!`;
     } else if (activeAgent === 'bai') {
         for (let i = 0; i < retries; i++) {
             try {
@@ -157,7 +129,7 @@ async function askAI(rawData, customPrompt, retries = 3) {
             try {
                 const response = await groq.chat.completions.create({
                     // Setel ke model groq
-                    model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+                    model: process.env.GROQ_MODEL || "groq/compound",
                     messages: [
                         { role: "system", content: customPrompt },
                         { role: "user", content: `Berikut adalah data mentah JSON-nya:\n${rawData}` }
@@ -618,10 +590,9 @@ function chooseAgent(callback) {
     console.log(`\n================ [ 🧠 PILIH OTAK AI ] ================`);
     console.log(`1. Groq (Fast, Default)`);
     console.log(`2. Gemini (Google, Smart)`);
-    console.log(`3. Ollama (Local, Custom)`);
-    console.log(`4. B.AI (Claude/Others)`);
+    console.log(`3. B.AI (Claude/Others)`);
     
-    rl.question('👉 Pilih Otak AI (1-4, atau Enter untuk Groq): ', (choice) => {
+    rl.question('👉 Pilih Otak AI (1-3, atau Enter untuk Groq): ', (choice) => {
         if (choice === '1' || choice === '') {
             activeAgent = 'groq';
             console.log(`\n🔄 Otak AI disetel ke: \x1b[32mGROQ\x1b[0m`);
@@ -631,39 +602,6 @@ function chooseAgent(callback) {
             console.log(`\n🔄 Otak AI disetel ke: \x1b[32mGEMINI\x1b[0m`);
             callback();
         } else if (choice === '3') {
-            console.log('\n⏳ Cek daftar model dari server Ollama...');
-            const tagsUrl = process.env.OLLAMA_TAGS_URL || 'https://ollama.fliw.my.id/api/tags';
-            fetch(tagsUrl)
-                .then(res => res.json())
-                .then(data => {
-                    console.log('\n📦 Model Ollama yang tersedia:');
-                    data.models.forEach((m, i) => {
-                        console.log(`   ${i + 1}. \x1b[36m${m.name}\x1b[0m`);
-                    });
-                    rl.question(`\n👉 Masukkan nama model atau angka (default: ${activeOllamaModel}): `, (input) => {
-                        activeAgent = 'ollama';
-                        const val = input.trim();
-                        if (val !== '') {
-                            const num = parseInt(val);
-                            if (!isNaN(num) && num > 0 && num <= data.models.length) {
-                                activeOllamaModel = data.models[num - 1].name;
-                            } else {
-                                activeOllamaModel = val;
-                            }
-                        }
-                        console.log(`\n🔄 Otak AI disetel ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
-                        callback();
-                    });
-                }).catch(err => {
-                    console.log(`\n❌ Gagal ambil list model otomatis (${err.message})`);
-                    rl.question(`👉 Ketik nama model manual (default: ${activeOllamaModel}): `, (modelName) => {
-                        activeAgent = 'ollama';
-                        if (modelName.trim() !== '') activeOllamaModel = modelName.trim();
-                        console.log(`\n🔄 Otak AI disetel ke: \x1b[32mOLLAMA (${activeOllamaModel})\x1b[0m`);
-                        callback();
-                    });
-                });
-        } else if (choice === '4') {
             const baiUrl = (process.env.BAI_BASE_URL || 'https://api.b.ai/v1').replace(/\/$/, '') + '/models';
             console.log('\n⏳ Cek daftar model dari server B.AI...');
             fetch(baiUrl, {
@@ -718,9 +656,7 @@ function chooseAgent(callback) {
 // ==========================================
 function showMenu() {
     let agentStatus = activeAgent.toUpperCase();
-    if (activeAgent === 'ollama') {
-        agentStatus += ` (${activeOllamaModel})`;
-    } else if (activeAgent === 'bai') {
+    if (activeAgent === 'bai') {
         agentStatus += ` (${activeBaiModel})`;
     }
     console.log(`
